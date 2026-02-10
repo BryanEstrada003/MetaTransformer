@@ -1,0 +1,6 @@
+# ignore dataset
+dataset-*
+
+# ignore checkpoints
+checkpoints
+
