@@ -1,0 +1,71 @@
+# Construir la imagen Docker
+docker build -t meta-transformer .
+
+# eliminar la imagen docker
+docker rmi meta-transformer
+
+# Detener y eliminar el contenedor existente
+docker stop meta-transformer
+docker rm meta-transformer
+
+# Crear un nuevo contenedor Docker y montar el directorio local con acceso a la GPU
+docker run --gpus all -it --shm-size=16g --network=host -v /c/Users/Admin-Cidis/Documents/mai/multimodal/MetaTransformer:/app meta-transformer bash
+
+# Lo mismo que el anterior solo que le asigno un puerto para poder trabajar con jupyter notebook
+docker run -it -p 8881:8881 --gpus all -v /c/Users/Admin-Cidis/Documents/mai/multimodal/MetaTransformer:/app --name meta-transformer meta-transformer
+
+#LINUX
+docker run -it -p 8889:8888 --gpus all -v /media/vision/8E4447A9444792BF/Users/Admin-Cidis/Documents/Fruit/meta-transformer:/app --name meta-transformer meta-transformer
+
+# Verificar la versión de nvcc
+nvcc --version
+
+# POR SI NO SE INSTALO PYTHON
+# Dentro del contenedor, ejecuta:
+apt-get update
+apt-get install -y python3 python3-pip python3-venv
+
+# Verificar instalación
+python3 --version
+pip3 --version
+
+
+export PYTHONPATH=$PYTHONPATH:/app/classification
+
+# Verificar la instalación de CUDA
+nvidia-smi
+
+# Detener el contenedor Docker
+docker stop meta-transformer
+
+# Iniciar el contenedor detenido
+docker start meta-transformer
+
+# Adjuntar al contenedor en ejecución
+docker attach meta-transformer
+
+# O abrir una nueva sesión de shell en el contenedor
+docker exec -it meta-transformer /bin/bash
+
+#activar jupyter
+jupyter notebook --ip=0.0.0.0 --port=8888 --allow-root
+
+
+# MODEL
+wget https://download.cs.stanford.edu/orion/scanobjectnn/h5_files.zip
+unzip h5_files.zip
+export PYTHONPATH=$PYTHONPATH:/app/classification
+sh scripts/scanobjectnn/meta-transformer_ssg_umb_2x.sh
+
+
+#to other data (???)
+rm data/ScanObjectNN
+ln -s /path/to/new_dataset data/ScanObjectNN
+export PYTHONPATH=$PYTHONPATH:/app/classification
+# before this set in train_cla_scanobjectnn.py from 
+# '''DATA LOADING - This section is modified to load ScanObjectNN dataset''' to
+# '''MODEL BUILDING'''
+sh scripts/scanobjectnn/meta-transformer_ssg_umb_2x.sh
+
+
+
