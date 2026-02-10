@@ -6,3 +6,6 @@ checkpoints
 
 # ignore .pdf
 *.pdf
+
+#metadata
+*.json
