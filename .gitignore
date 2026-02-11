@@ -9,3 +9,6 @@ checkpoints
 
 #metadata
 *.json
+
+# ignore
+*.pyc
