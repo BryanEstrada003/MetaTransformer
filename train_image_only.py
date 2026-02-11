@@ -15,6 +15,126 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import warnings
+warnings.filterwarnings('ignore')
+
+# Agregar Data2Seq al path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, current_dir)
+sys.path.insert(0, os.path.join(current_dir, "Data2Seq"))
+
+from Data2Seq import Data2Seq
+from timm.models.vision_transformer import Block
+
+class MultimodalModel(nn.Module):
+    """Modelo multimodal para clasificación"""
+    
+    def __init__(self, config):
+        super().__init__()
+        
+        model_config = config['model']
+        training_config = config['training']
+        paths_config = config['paths']
+        
+        self.dim = model_config['dim']
+        num_classes = model_config['num_classes']
+        
+        # Tokenizadores
+        self.image_tokenizer = Data2Seq(modality='image', dim=self.dim)
+        
+        # Encoder (Meta-Transformer)
+        encoder_weights_path = paths_config['encoder_weights']
+        try:
+            if os.path.exists(encoder_weights_path):
+                ckpt = torch.load(encoder_weights_path, map_location='cpu')
+                self.encoder = nn.Sequential(*[
+                    Block(
+                        dim=self.dim,
+                        num_heads=12,
+                        mlp_ratio=4.,
+                        qkv_bias=True,
+                        norm_layer=nn.LayerNorm,
+                        act_layer=nn.GELU
+                    )
+                    for _ in range(12)
+                ])
+                self.encoder.load_state_dict(ckpt, strict=True)
+                
+                # Congelar encoder si se solicita
+                if training_config['freeze_encoder']:
+                    for param in self.encoder.parameters():
+                        param.requires_grad = False
+                    print("Encoder congelado")
+                else:
+                    print("Encoder entrenable")
+                    
+            else:
+                print(f"Advertencia: Archivo de pesos no encontrado: {encoder_weights_path}")
+                print("Inicializando encoder desde cero")
+                self.encoder = nn.Sequential(*[
+                    Block(
+                        dim=self.dim,
+                        num_heads=12,
+                        mlp_ratio=4.,
+                        qkv_bias=True,
+                        norm_layer=nn.LayerNorm,
+                        act_layer=nn.GELU
+                    )
+                    for _ in range(12)
+                ])
+                
+        except Exception as e:
+            print(f"Error cargando encoder: {e}")
+            print("Inicializando encoder desde cero")
+            self.encoder = nn.Sequential(*[
+                Block(
+                    dim=self.dim,
+                    num_heads=12,
+                    mlp_ratio=4.,
+                    qkv_bias=True,
+                    norm_layer=nn.LayerNorm,
+                    act_layer=nn.GELU
+                )
+                for _ in range(12)
+            ])
+        
+        # Head de clasificación
+        hidden_dim = model_config['classifier_hidden_dim']
+        dropout = model_config['classifier_dropout']
+        
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(self.dim),
+            nn.Linear(self.dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, num_classes)
+        )
+        
+        # Estadísticas del modelo
+        total_params = sum(p.numel() for p in self.parameters())
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        
+        print(f"Total parámetros: {total_params:,}")
+        print(f"Parámetros entrenables: {trainable_params:,}")
+        print(f"Porcentaje entrenable: {100*trainable_params/total_params:.2f}%")
+    
+    def forward(self, images):
+        # Tokenizar imágenes (batch_size, 197, dim)
+        img_tokens = self.image_tokenizer(images)        
+        
+        # Concatenar tokens (excluyendo CLS token de tabular)
+        features = torch.cat([img_tokens], dim=1)
+        
+        # Pasar por encoder
+        encoded = self.encoder(features)
+        
+        # Usar CLS token para clasificación (posición 0)
+        cls_token = encoded[:, 0, :]
+        
+        # Clasificación
+        logits = self.classifier(cls_token)
+        
+        return logits
 
 class ConfigLoader:
     @staticmethod
@@ -146,9 +266,7 @@ def main(config_path):
                               shuffle=False, num_workers=config['training']['num_workers'])
     
     # Modelo
-    model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
-    in_features = model.fc.in_features
-    model.fc = nn.Linear(in_features, config['model']['num_classes'])
+    model = MultimodalModel(config)
     model = model.to(device)
     
     # Pesos de clase (opcional)
