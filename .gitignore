@@ -12,3 +12,9 @@ checkpoints
 
 # ignore
 *.pyc
+
+# analyze
+analyze_results.py
+
+#
+*.txt
