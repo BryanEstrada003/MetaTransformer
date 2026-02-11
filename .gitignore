@@ -14,7 +14,7 @@ checkpoints
 *.pyc
 
 # analyze
-analyze_results.py
+analyze*
 
 #
 *.txt

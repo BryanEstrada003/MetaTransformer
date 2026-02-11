@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import warnings
 import argparse
+from sklearn.utils import class_weight
 warnings.filterwarnings('ignore')
 
 # Agregar Data2Seq al path
@@ -299,6 +300,13 @@ def create_datasets(config, class_tabular_data):
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
     ])
+
+    transform_train = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(10),
+        transforms.ToTensor(),
+    ])
     
     base_dir = config['paths']['base_dir']
     image_dirs = config['data']['image_dirs']
@@ -364,7 +372,7 @@ def create_datasets(config, class_tabular_data):
     
     # 3. Crear datasets (tu clase MultimodalDataset no necesita cambios)
     train_dataset = MultimodalDataset(
-        base_dir / image_dirs['train'], train_tabular, class_mapping, transform, mode='train'
+        base_dir / image_dirs['train'], train_tabular, class_mapping, transform_train, mode='train'
     )
     val_dataset = MultimodalDataset(
         base_dir / image_dirs['val'], val_tabular, class_mapping, transform, mode='val'
@@ -374,6 +382,22 @@ def create_datasets(config, class_tabular_data):
     )
     
     return train_dataset, val_dataset, test_dataset
+
+def calculate_class_weights(train_loader, num_classes=10):
+    """Calcula pesos de clase a partir de un DataLoader"""
+    class_counts = torch.zeros(num_classes)
+    
+    for _, _, labels in train_loader:  # labels es tensor de batch
+        for label in labels:
+            class_counts[label] += 1
+    
+    total_samples = class_counts.sum()
+    class_weights = total_samples / (num_classes * class_counts)
+    
+    # Evitar infinitos si alguna clase tiene 0
+    class_weights = torch.nan_to_num(class_weights, nan=1.0)
+    
+    return class_weights
 
 class Trainer:
     """Entrenador para el modelo multimodal"""
@@ -395,7 +419,7 @@ class Trainer:
         
         pbar = tqdm(dataloader, desc='Entrenando')
         for images, tabular, labels in pbar:
-            images, tabular, labels = images.to(self.device), tabular.to(self.device), labels.to(self.device)
+            images, tabular, labels = images.to(self.device), tabular.to(self.device), labels.to(self.device)           
             
             optimizer.zero_grad()
             
@@ -508,9 +532,13 @@ def main(config_path):
     print("\nCreando modelo...")
     model = MultimodalModel(config)
     model = model.to(device)
+
+    class_weights = calculate_class_weights(train_loader)
+
+    print(f"Pesos de clase calculados: {class_weights}")
     
     # Configurar entrenamiento
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
     
     # Solo entrenar parámetros que requieren gradiente
     trainable_params = [p for p in model.parameters() if p.requires_grad]
