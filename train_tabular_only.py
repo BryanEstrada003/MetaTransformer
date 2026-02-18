@@ -94,6 +94,7 @@ class TabularOnlyModel(nn.Module):
         
         self.classifier = nn.Sequential(
             nn.LayerNorm(self.dim),
+            nn.Dropout(dropout),
             nn.Linear(self.dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -227,22 +228,32 @@ def test(model, loader, device):
     acc = 100. * np.mean(np.array(preds) == np.array(labels))
     return acc, preds, labels
 
-def save_results(output_dir, history, test_acc, test_preds, test_labels):
+def save_results(config, output_dir, history, test_acc, test_preds, test_labels):
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Predicciones
-    pd.DataFrame({'true': test_labels, 'pred': test_preds}).to_csv(
-        output_dir / 'test_predictions_tabular.csv', index=False)
+    pd.DataFrame({'true_label': test_labels, 'predicted_label': test_preds}).to_csv(
+        output_dir / 'test_predictions.csv', index=False)
     
     # Historial
     with open(output_dir / 'history_tabular.json', 'w') as f:
         json.dump(history, f)
     
+    # Guardar configuración usada
+    config_path = output_dir / 'training_config.json'
+    with open(str(config_path), 'w') as f:
+        # Convertir Path objects a strings para JSON
+        config_serializable = json.loads(json.dumps(config, default=str))
+        json.dump(config_serializable, f, indent=4)
+
     # Métricas
     metrics = {
         'best_val_acc': max(history['val_acc']),
         'test_acc': test_acc,
-        'epochs': len(history['train_acc'])
+        'final_train_accuracy': history['train_acc'][-1],
+        'final_val_accuracy': history['val_acc'][-1],
+        'num_epochs': len(history['train_acc']),
+        'timestamp': pd.Timestamp.now().isoformat()
     }
     with open(output_dir / 'metrics_tabular.json', 'w') as f:
         json.dump(metrics, f, indent=4)
@@ -285,6 +296,12 @@ def main(config_path):
     # 4. Crear DataFrames con la misma partición que el multimodal
     print("\nCreando particiones train/val/test (mismo orden que multimodal)...")
     train_df, val_df, test_df = create_tabular_datasets(config, class_tabular_data)
+
+    #imprimir la cantidad de muestras por clase en cada split
+    print("\nCantidad de muestras por clase en cada split:")
+    for split_name, df in zip(['Train', 'Val', 'Test'], [train_df, val_df, test_df]):
+        counts = df['class_idx'].value_counts().to_dict()
+        print(f"{split_name}: {counts}")
     
     # 5. Datasets y DataLoaders (SIN normalización, valores crudos)
     feature_cols = config['column_tabular']
@@ -311,9 +328,14 @@ def main(config_path):
     
     # 8. Optimizador y scheduler (solo parámetros entrenables)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_params, lr=config['training']['learning_rate'])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=config['training']['num_epochs'])
+    optimizer = torch.optim.Adam(trainable_params, lr=config['training']['learning_rate'])
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 
+        mode='min', 
+        factor=0.5, 
+        patience=10, 
+        min_lr=1e-6,
+    )
     
     # 9. Entrenamiento
     print("\nIniciando entrenamiento...")
@@ -325,7 +347,7 @@ def main(config_path):
         
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_acc = validate(model, val_loader, criterion, device)
-        scheduler.step()
+        scheduler.step(val_loss)
         
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
@@ -345,7 +367,7 @@ def main(config_path):
     print(f"Test Accuracy: {test_acc:.2f}%")
     
     # 11. Guardar resultados
-    save_results(output_dir, history, test_acc, preds, labels)
+    save_results(config, output_dir, history, test_acc, preds, labels)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
