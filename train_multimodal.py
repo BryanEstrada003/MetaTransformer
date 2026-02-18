@@ -26,6 +26,10 @@ sys.path.insert(0, os.path.join(current_dir, "Data2Seq"))
 from Data2Seq import Data2Seq
 from timm.models.vision_transformer import Block
 
+#  add seed
+
+
+
 class ConfigLoader:
     """Cargador de configuración desde JSON"""
     
@@ -254,11 +258,14 @@ class TabularDataLoader:
         class_data = {}
         
         # Clases 0-4
+        current = 0
         for i, sheet in enumerate(data_config['sheets']['typeA_sheets']):
             try:
                 df = pd.read_excel(typeA_excel, sheet_name=sheet)
                 df = df[column_tabular].copy()
                 class_data[i] = df
+                print(f"Clase {i} cargada con {len(df)} filas desde hoja {sheet}")
+                current = i
             except Exception as e:
                 print(f"Error cargando hoja {sheet}: {e}")
         
@@ -267,7 +274,8 @@ class TabularDataLoader:
             try:
                 df = pd.read_excel(typeB_excel, sheet_name=sheet)
                 df = df[column_tabular].copy()
-                class_data[i + 5] = df
+                class_data[i + (current+1)] = df
+                print(f"Clase {i + (current+1)} cargada con {len(df)} filas desde hoja {sheet}")
             except Exception as e:
                 print(f"Error cargando hoja {sheet}: {e}")
         
@@ -533,7 +541,7 @@ def main(config_path):
     model = MultimodalModel(config)
     model = model.to(device)
 
-    class_weights = calculate_class_weights(train_loader)
+    class_weights = calculate_class_weights(train_loader, config['model']['num_classes'])
 
     print(f"Pesos de clase calculados: {class_weights}")
     
@@ -542,7 +550,7 @@ def main(config_path):
     
     # Solo entrenar parámetros que requieren gradiente
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable_params, lr=training_config['learning_rate'])
+    optimizer = torch.optim.Adam(trainable_params, lr=training_config['learning_rate'])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=training_config['num_epochs']
     )
@@ -636,8 +644,8 @@ def save_results(config, output_dir, trainer, test_acc, test_preds, test_labels)
     
     # Guardar métricas finales
     metrics = {
-        'best_val_accuracy': max(trainer.history['val_acc']),
-        'final_test_accuracy': test_acc,
+        'best_val_acc': max(trainer.history['val_acc']),
+        'test_acc': test_acc,
         'final_train_accuracy': trainer.history['train_acc'][-1],
         'final_val_accuracy': trainer.history['val_acc'][-1],
         'num_epochs': len(trainer.history['train_acc']),

@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+from torch.utils.data import Dataset  # Añadir esta línea
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
@@ -104,6 +105,7 @@ class MultimodalModel(nn.Module):
         
         self.classifier = nn.Sequential(
             nn.LayerNorm(self.dim),
+            nn.Dropout(dropout),
             nn.Linear(self.dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -135,6 +137,70 @@ class MultimodalModel(nn.Module):
         logits = self.classifier(cls_token)
         
         return logits
+
+class FilteredImageFolder(Dataset):
+    """Dataset que filtra ImageFolder por clases permitidas"""
+    
+    def __init__(self, root, allowed_classes, transform=None):
+        self.root = Path(root)
+        self.transform = transform
+        self.allowed_classes = allowed_classes
+        
+        # Cargar ImageFolder completo
+        self.full_dataset = ImageFolder(str(self.root), transform=transform)
+        
+        # Crear mapping de índices originales a nuevos índices
+        self.original_to_new = {}
+        self.new_class_names = []
+        
+        # Filtrar solo las clases permitidas
+        for class_name, class_idx in self.full_dataset.class_to_idx.items():
+
+            if class_name in list(allowed_classes.keys()):
+                class_idx_new = allowed_classes[class_name]
+                self.original_to_new[class_idx] = class_idx_new
+                self.new_class_names.append(class_name)
+                print(f"Clase permitida encontrada: {class_name} (original idx: {class_idx}, nuevo idx: {self.original_to_new[class_idx]})")
+
+                # ordena la nueva lista de clases según los nuevos índices
+                self.new_class_names.sort(key=lambda x: allowed_classes[x])
+        
+        if not self.original_to_new:
+            raise ValueError(f"No se encontraron clases permitidas en {root}. "
+                           f"Clases disponibles: {list(self.full_dataset.class_to_idx.keys())}")
+        
+        # Filtrar muestras
+        self.samples = []
+        self.targets = []
+        
+        for img_path, original_idx in self.full_dataset.samples:
+            if original_idx in self.original_to_new:
+                new_idx = self.original_to_new[original_idx]
+                self.samples.append((img_path, new_idx))
+                self.targets.append(new_idx)
+        
+        print(f"  Clases encontradas en {root.name}: {[self.full_dataset.classes[i] for i in self.original_to_new.keys()]}")
+        print(f"  Total muestras: {len(self.samples)}")
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        path, target = self.samples[idx]
+        sample = self.full_dataset.loader(path)
+        
+        if self.transform is not None:
+            sample = self.transform(sample)
+        
+        return sample, target
+    
+    @property
+    def classes(self):
+        return self.new_class_names
+    
+    @property
+    def class_to_idx(self):
+        return {name: i for i, name in enumerate(self.new_class_names)}
 
 class ConfigLoader:
     @staticmethod
@@ -211,20 +277,41 @@ def test(model, loader, device):
     acc = 100. * np.mean(np.array(preds_list) == np.array(labels_list))
     return acc, preds_list, labels_list
 
-def save_results(output_uni, history, test_acc, test_preds, test_labels, class_names):
-    output_uni.mkdir(parents=True, exist_ok=True)
+def save_results(config, output_dir, history, test_acc, test_preds, test_labels, class_names):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Guardar nombres de clases
+    with open(output_dir / 'class_names.json', 'w') as f:
+        json.dump(class_names, f, indent=4)
+    
     # predicciones
-    pd.DataFrame({'true': test_labels, 'pred': test_preds}).to_csv(output_uni / 'test_predictions_image.csv', index=False)
-    # historial
-    with open(output_uni / 'history_image.json', 'w') as f:
+    pd.DataFrame({
+        'true_label': test_labels, 
+        'predicted_label': test_preds,
+        'true_class': [class_names[l] for l in test_labels],
+        'predicted_class': [class_names[p] for p in test_preds]
+    }).to_csv(output_dir / 'test_predictions.csv', index=False)# historial
+
+    with open(output_dir / 'history_image.json', 'w') as f:
         json.dump(history, f)
+
+    # Guardar configuración usada
+    config_path = output_dir / 'training_config.json'
+    with open(str(config_path), 'w') as f:
+        # Convertir Path objects a strings para JSON
+        config_serializable = json.loads(json.dumps(config, default=str))
+        json.dump(config_serializable, f, indent=4)
+
     # métricas
     metrics = {
-        'best_val_acc': max(history['val_acc']),
+        'best_val_accuracy': max(history['val_acc']),
         'test_acc': test_acc,
-        'epochs': len(history['train_acc'])
+        'final_train_accuracy': history['train_acc'][-1],
+        'final_val_accuracy': history['val_acc'][-1],
+        'num_epochs': len(history['train_acc']),
+        'timestamp': pd.Timestamp.now().isoformat()
     }
-    with open(output_uni / 'metrics_image.json', 'w') as f:
+    with open(output_dir / 'metrics_image.json', 'w') as f:
         json.dump(metrics, f, indent=4)
     # gráficas
     plt.figure(figsize=(12,4))
@@ -236,9 +323,9 @@ def save_results(output_uni, history, test_acc, test_preds, test_labels, class_n
     plt.plot(history['train_acc'], label='Train Acc')
     plt.plot(history['val_acc'], label='Val Acc')
     plt.legend()
-    plt.savefig(output_uni / 'training_history_image.png')
+    plt.savefig(output_dir / 'training_history_image.png')
     plt.close()
-    print(f"Resultados imagen guardados en {output_uni}")
+    print(f"Resultados imagen guardados en {output_dir}")
 
 def main(config_path):
     config = ConfigLoader.load_config(config_path)
@@ -251,12 +338,31 @@ def main(config_path):
     output_uni.mkdir(parents=True, exist_ok=True)
     
     # Datasets
-    train_dataset = ImageFolder(base_dir / image_dirs['train'], transform=get_transforms('train'))
-    val_dataset   = ImageFolder(base_dir / image_dirs['val'],   transform=get_transforms('val'))
-    test_dataset  = ImageFolder(base_dir / image_dirs['test'],  transform=get_transforms('val'))
-    
+    # Obtener clases permitidas del metadata
+    allowed_classes = config['classes']
+    print(f"Clases permitidas según metadata: {allowed_classes}")
+
+    # Crear datasets filtrados
+    print("\nFiltrando datasets por clases del metadata...")
+    train_dataset = FilteredImageFolder(
+        base_dir / image_dirs['train'], 
+        allowed_classes, 
+        transform=get_transforms('train')
+    )
+    val_dataset = FilteredImageFolder(
+        base_dir / image_dirs['val'], 
+        allowed_classes, 
+        transform=get_transforms('val')
+    )
+    test_dataset = FilteredImageFolder(
+        base_dir / image_dirs['test'], 
+        allowed_classes, 
+        transform=get_transforms('val')
+    )
+
     class_names = train_dataset.classes
-    print(f"Clases encontradas: {class_names}")
+    print(f"\nClases finales para entrenamiento: {class_names}")
+    print(f"Número de clases: {len(class_names)}")
     
     train_loader = DataLoader(train_dataset, batch_size=config['training']['batch_size'],
                               shuffle=True, num_workers=config['training']['num_workers'])
@@ -271,12 +377,18 @@ def main(config_path):
     
     # Pesos de clase (opcional)
     from sklearn.utils.class_weight import compute_class_weight
+    # Obtener labels del dataset filtrado
     labels = train_dataset.targets
-    class_weights = compute_class_weight('balanced', classes=np.unique(labels), y=labels)
+    unique_classes = np.unique(labels)
+    print(f"Clases únicas en train: {unique_classes}")
+
+    # Calcular pesos de clase
+    class_weights = compute_class_weight('balanced', classes=unique_classes, y=labels)
     class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
+    print(f"Pesos de clase calculados: {class_weights}")
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config['training']['learning_rate'])
+    optimizer = torch.optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['training']['num_epochs'])
     
     history = {'train_loss':[], 'train_acc':[], 'val_loss':[], 'val_acc':[]}
@@ -304,7 +416,7 @@ def main(config_path):
     test_acc, preds, labels = test(model, test_loader, device)
     print(f"Test Accuracy: {test_acc:.2f}%")
     
-    save_results(output_uni, history, test_acc, preds, labels, class_names)
+    save_results(config, output_uni, history, test_acc, preds, labels, class_names)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
