@@ -4,7 +4,6 @@ import sys
 import json
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
@@ -15,7 +14,6 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import warnings
 import argparse
-from sklearn.utils import class_weight
 warnings.filterwarnings('ignore')
 
 # Agregar Data2Seq al path
@@ -26,9 +24,18 @@ sys.path.insert(0, os.path.join(current_dir, "Data2Seq"))
 from Data2Seq import Data2Seq
 from timm.models.vision_transformer import Block
 
+import random
+
 #  add seed
-
-
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"Semilla fijada en {seed}")
 
 class ConfigLoader:
     """Cargador de configuración desde JSON"""
@@ -205,6 +212,7 @@ class MultimodalModel(nn.Module):
         
         self.classifier = nn.Sequential(
             nn.LayerNorm(self.dim),
+            nn.Dropout(dropout),
             nn.Linear(self.dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -312,6 +320,7 @@ def create_datasets(config, class_tabular_data):
     transform_train = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
         transforms.RandomRotation(10),
         transforms.ToTensor(),
     ])
@@ -507,6 +516,9 @@ def main(config_path):
     # Cargar configuración
     print(f"Cargando configuración desde: {config_path}")
     config = ConfigLoader.load_config(config_path)
+
+    seed = config.get('seed', 42)
+    set_seed(seed)
     
     # Configurar dispositivo
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -546,13 +558,25 @@ def main(config_path):
     print(f"Pesos de clase calculados: {class_weights}")
     
     # Configurar entrenamiento
-    criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
+    criterion = nn.CrossEntropyLoss(
+        weight=class_weights.to(device),
+        label_smoothing=training_config.get('label_smoothing', 0.0)
+    )
     
     # Solo entrenar parámetros que requieren gradiente
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(trainable_params, lr=training_config['learning_rate'])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=training_config['num_epochs']
+    weight_decay = training_config.get('weight_decay', 0.0)
+    optimizer = torch.optim.Adam(
+        trainable_params, 
+        lr=training_config['learning_rate'], 
+        weight_decay=weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 
+        mode='min', 
+        factor=0.5, 
+        patience=10, 
+        min_lr=1e-6,
     )
     
     # Entrenador
@@ -572,7 +596,7 @@ def main(config_path):
         val_loss, val_acc = trainer.validate(model, val_loader, criterion)
         
         # Actualizar scheduler
-        scheduler.step()
+        scheduler.step(val_loss)
         
         # Guardar historial
         trainer.history['train_loss'].append(train_loss)
@@ -644,7 +668,7 @@ def save_results(config, output_dir, trainer, test_acc, test_preds, test_labels)
     
     # Guardar métricas finales
     metrics = {
-        'best_val_acc': max(trainer.history['val_acc']),
+        'best_val_accuracy': max(trainer.history['val_acc']),
         'test_acc': test_acc,
         'final_train_accuracy': trainer.history['train_acc'][-1],
         'final_val_accuracy': trainer.history['val_acc'][-1],

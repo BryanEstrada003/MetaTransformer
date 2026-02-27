@@ -15,6 +15,8 @@ import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+import random
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import warnings
 warnings.filterwarnings('ignore')
@@ -27,6 +29,15 @@ sys.path.insert(0, os.path.join(current_dir, "Data2Seq"))
 from Data2Seq import Data2Seq
 from timm.models.vision_transformer import Block
 
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"Semilla fijada en {seed}")
 class MultimodalModel(nn.Module):
     """Modelo multimodal para clasificación"""
     
@@ -223,6 +234,7 @@ def get_transforms(mode='train'):
         return transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.RandomHorizontalFlip(),
+            transforms.RandomVerticalFlip(),
             transforms.RandomRotation(10),
             transforms.ToTensor(),
         ])
@@ -331,6 +343,9 @@ def main(config_path):
     config = ConfigLoader.load_config(config_path)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
+
+    seed = config.get('seed', 42)
+    set_seed(seed)
     
     base_dir = config['paths']['base_dir']
     image_dirs = config['data']['image_dirs']
@@ -386,11 +401,24 @@ def main(config_path):
     class_weights = compute_class_weight('balanced', classes=unique_classes, y=labels)
     class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
     print(f"Pesos de clase calculados: {class_weights}")
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    criterion = nn.CrossEntropyLoss(
+        weight=class_weights,
+        label_smoothing=config['training'].get('label_smoothing', 0.0)
+    )
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['training']['learning_rate'])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['training']['num_epochs'])
-    
+    optimizer = torch.optim.Adam(
+        model.parameters(), 
+        lr=config['training']['learning_rate'],
+        weight_decay=config['training'].get('weight_decay', 0.0)
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 
+        mode='min', 
+        factor=0.5, 
+        patience=10, 
+        min_lr=1e-6,
+    )
+        
     history = {'train_loss':[], 'train_acc':[], 'val_loss':[], 'val_acc':[]}
     best_val_acc = 0
     
@@ -398,7 +426,7 @@ def main(config_path):
         print(f"\nEpoch {epoch+1}/{config['training']['num_epochs']}")
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_acc = validate(model, val_loader, criterion, device)
-        scheduler.step()
+        scheduler.step(val_loss)
         
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)

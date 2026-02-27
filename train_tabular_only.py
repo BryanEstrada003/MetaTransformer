@@ -12,6 +12,8 @@ import argparse
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
+import random
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # ---------- Importar Data2Seq y bloques transformer ----------
@@ -21,6 +23,16 @@ from timm.models.vision_transformer import Block
 
 # ---------- Reutilizar funciones del script multimodal ----------
 from train_multimodal import ConfigLoader, TabularDataLoader, count_images_per_class_split
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    print(f"Semilla fijada en {seed}")
 
 # ------------------------------------------------------------
 #   MODELO UNIMODAL PARA TABULAR (MISMA ARQUITECTURA)
@@ -324,11 +336,17 @@ def main(config_path):
     classes = np.unique(labels)
     class_weights = compute_class_weight('balanced', classes=classes, y=labels)
     class_weights = torch.tensor(class_weights, dtype=torch.float32).to(device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    criterion = nn.CrossEntropyLoss(weight=class_weights,
+                                    label_smoothing=config['training'].get('label_smoothing', 0.0))
     
     # 8. Optimizador y scheduler (solo parámetros entrenables)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(trainable_params, lr=config['training']['learning_rate'])
+    weight_decay = config['training'].get('weight_decay', 0.0)
+    optimizer = torch.optim.Adam(
+        trainable_params, 
+        lr=config['training']['learning_rate'], 
+        weight_decay=weight_decay
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         mode='min', 
