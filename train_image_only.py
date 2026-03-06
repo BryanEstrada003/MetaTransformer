@@ -54,6 +54,17 @@ class MultimodalModel(nn.Module):
         # Tokenizadores
         self.image_tokenizer = Data2Seq(modality='image', dim=self.dim)
         
+        # Asumiendo imágenes de 224x224 y parches de 16x16 -> 196 parches
+        self.num_image_patches = (224 // 16) ** 2 
+        
+        # Token CLS global
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.dim))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        
+        # Embeddings posicionales visuales (196 parches + 1 CLS = 197)
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_image_patches + 1, self.dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        
         # Encoder (Meta-Transformer)
         encoder_weights_path = paths_config['encoder_weights']
         try:
@@ -132,8 +143,16 @@ class MultimodalModel(nn.Module):
         print(f"Porcentaje entrenable: {100*trainable_params/total_params:.2f}%")
     
     def forward(self, images):
+        batch_size = images.shape[0]
         # Tokenizar imágenes (batch_size, 197, dim)
-        img_tokens = self.image_tokenizer(images)        
+        img_tokens = self.image_tokenizer(images)    
+
+        # 2. Agregar el token CLS a las imágenes -> (batch_size, 197, dim)
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        img_tokens = torch.cat((cls_tokens, img_tokens), dim=1)
+        
+        # 3. Sumar la información de posición espacial
+        img_tokens = img_tokens + self.pos_embed    
         
         # Concatenar tokens (excluyendo CLS token de tabular)
         features = torch.cat([img_tokens], dim=1)
