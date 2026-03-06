@@ -24,5 +24,5 @@ class PatchEmbed(nn.Module):
         # flatten: [B, C, H, W] -> [B, C, HW]
         # transpose: [B, C, HW] -> [B, HW, C]
         x = self.proj(x).flatten(2).transpose(1, 2)
-        # x = self.norm(x)
+        x = self.norm(x)
         return x

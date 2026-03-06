@@ -71,8 +71,10 @@ class TabularEmbedSeparateTokens(nn.Module):
         self.num_features = num_features
         self.embed_dim = embed_dim
         
-        # Project each feature separately (1D conv over features)
-        self.projection = nn.Linear(1, embed_dim)
+        # One linear projection per feature
+        self.projections = nn.ModuleList([
+            nn.Linear(1, embed_dim) for _ in range(num_features)
+        ])
         
         # Learnable positional embeddings
         self.pos_embedding = nn.Parameter(torch.zeros(1, num_features + 1, embed_dim))  # +1 for CLS
@@ -92,18 +94,21 @@ class TabularEmbedSeparateTokens(nn.Module):
         """
         batch_size = x.shape[0]
         
-        # Reshape para tratar cada feature como entrada separada
-        x = x.unsqueeze(-1)  # (batch_size, num_features, 1)
+        # Proyectar cada sensor por separado y apilarlos
+        # x[:, i:i+1] extrae la columna 'i' manteniendo la dimensión: (batch_size, 1)
+        projected_tokens = [
+            proj(x[:, i:i+1]).unsqueeze(1) for i, proj in enumerate(self.projections)
+        ]
         
         # Proyectar cada feature
-        embeddings = self.projection(x)  # (batch_size, num_features, embed_dim)
+        embeddings = torch.cat(projected_tokens, dim=1)  # (batch_size, num_features, embed_dim)
         
         # Agregar CLS token
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # (batch_size, 1, embed_dim)
         embeddings = torch.cat([cls_tokens, embeddings], dim=1)  # (batch_size, num_features + 1, embed_dim)
         
         # Agregar embeddings posicionales
-        embeddings = embeddings + self.pos_embedding[:, :embeddings.shape[1], :]
+        embeddings = embeddings + self.pos_embedding
         
         # Aplicar normalización y dropout
         embeddings = self.norm(embeddings)
